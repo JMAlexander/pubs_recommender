@@ -22,7 +22,7 @@ from io import BytesIO
 from reportlab.platypus import Image
 from datetime import datetime
 
-def generate_cluster_report(papers_library, bow_corpus, dictionary, window_size=50, step_size=50, verbose=False):
+def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, window_size=50, step_size=50, verbose=False):
     """
     Generate a PDF report analyzing the library clusters and a simple text file for feed search preferences.
     
@@ -30,18 +30,11 @@ def generate_cluster_report(papers_library, bow_corpus, dictionary, window_size=
         papers_library: List of papers to analyze
         bow_corpus: Bag-of-words corpus
         dictionary: Gensim dictionary
+        output_dir: Directory to save the report
         window_size: Number of papers in each analysis window
         step_size: Number of papers to step forward for each window
         verbose: Whether to print detailed debugging information
     """
-    # Set default output directory to 'output' in the program directory
-    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output')
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Create timestamped folder inside output directory
-    timestamp = datetime.now().strftime('%Y_%m_%d_%H%M%S')
-    run_dir = os.path.join(output_dir, timestamp)
-    os.makedirs(run_dir, exist_ok=True)
     
     # Initialize ClusterTracker and RollingClusterAnalyzer
     tracker = lang_helper.ClusterTracker()
@@ -214,45 +207,80 @@ def generate_cluster_report(papers_library, bow_corpus, dictionary, window_size=
     print(f"Feed preferences saved to {preferences_file}")
 
 def main():
+    # Set up argument parser
     parser = argparse.ArgumentParser(description='Analyze library clusters and generate reports.')
+    parser.add_argument('--library', type=str, help='Path to specific library file (optional)')
     parser.add_argument('--clustering_method', type=str, default='ward', help='Clustering method (ward or complete)')
     parser.add_argument('--window_size', type=int, default=50, help='Number of papers in each analysis window')
     parser.add_argument('--step_size', type=int, default=50, help='Number of papers to step forward for each window')
     parser.add_argument('--verbose', action='store_true', help='Print detailed debugging information')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing models')
     args = parser.parse_args()
-    
+
     # Set default paths for library file and model path
-    library_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
-    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
+    data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
+    model_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
     
     # Load library
-    papers_library = lang_helper.load_recent_library(library_file)
+    if args.library:
+        # Use user-provided library path
+        papers_library = lang_helper.load_library(args.library)
+    else:
+        # Use default data directory
+        library_path = lang_helper.get_recent_library(data_dir)
+        if library_path is None:
+            print(f"Error: Could not find library in {data_dir}")
+            return
+        papers_library = lang_helper.load_library(library_path)
+    
+    if papers_library is None:
+        print(f"Error: Could not load library")
+        return
+    
+    # Load word model
+    pubmed_wordmodel = lang_helper.load_word_model(model_path)
+    if pubmed_wordmodel is None:
+        print(f"Error: Could not load word model")
+        return
     
     # Load or create models
-    dictionary, model_tfidf, termsim_matrix = lang_helper.load_or_create_models(papers_library, model_path, args.overwrite)
+    dictionary, bow_corpus, model_tfidf, termsim_matrix = lang_helper.load_or_create_models(papers_library, pubmed_wordmodel, model_path, args.overwrite)
     
-    # Tokenize library
-    tokenized_library = lang_helper.tokenize_library(papers_library)
+    # Filter library and tokenize
+    filtered_library = lang_helper.filter_library(papers_library, type='title')
+    tokenized_library = lang_helper.tokenize_library(filtered_library)
     bow_corpus = [dictionary.doc2bow(text) for text in tokenized_library]
     
     # Cluster library
-    optimal_n, silhouette_scores = lang_helper.cluster_library(bow_corpus, termsim_matrix, papers_library,
+    optimal_n, silhouette_scores = lang_helper.cluster_library(bow_corpus, termsim_matrix, filtered_library,
                                                      method=args.clustering_method, verbose=args.verbose)
     
     # Print clustering results
     print(f"Optimal number of clusters: {optimal_n}")
     print(f"Silhouette score for {optimal_n} clusters: {silhouette_scores[optimal_n]:.3f}")
     
-    # Save models and papers library
+    # Save models (only if overwrite is True)
     if args.overwrite:
-        print("Saving models and papers library...")
-        lang_helper.save_models(dictionary, model_tfidf, termsim_matrix, model_path, papers_library)
+        print("Saving models...")
+        lang_helper.save_models(dictionary, model_tfidf, termsim_matrix, model_path)
+    
+    # Create output directory
+    output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create timestamped folder inside output directory
+    timestamp = datetime.now().strftime('%Y_%m_%d_%H%M%S')
+    run_dir = os.path.join(output_dir, timestamp)
+    os.makedirs(run_dir, exist_ok=True)
     
     # Generate report
     print("Generating analysis report...")
-    generate_cluster_report(papers_library, bow_corpus, dictionary,
+    generate_cluster_report(filtered_library, bow_corpus, dictionary, run_dir,
                           window_size=args.window_size, step_size=args.step_size, verbose=args.verbose)
+    
+    # Save papers library to output directory
+    print("Saving papers library...")
+    lang_helper.save_papers_library(filtered_library, run_dir)
     
     print("Analysis complete!")
 

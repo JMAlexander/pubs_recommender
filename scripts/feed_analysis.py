@@ -23,19 +23,12 @@ def load_models(model_dir):
     """Load the necessary models for analysis."""
     dictionary = corpora.Dictionary.load(os.path.join(model_dir, 'dictionary.gensim'))
 
-    # Download it if it doesn't exist locally
-    expected_model_location = os.path.join(model_dir, 'pubmed2018_w2v_200D.bin')
-    if (not os.path.exists(expected_model_location)):
-        print("Downloading the Pubmed model...")
-    lang_helper.load_file_from_s3(origin_path='lang_processing/gensim-data/pubmed2018_w2v_200D/pubmed2018_w2v_200D.bin',
-                       final_path=expected_model_location)
-
-    # Load the Pubmed model
+    # Load the Pubmed model using the helper function
     print("Loading the Pubmed model and building the similarity index...")
-    pubmed_wordmodel = models.KeyedVectors.load_word2vec_format(expected_model_location, binary=True)
+    pubmed_wordmodel = lang_helper.load_word_model(model_dir)
     termsim_index = WordEmbeddingSimilarityIndex(pubmed_wordmodel)
 
-    return dictionary, termsim_index
+    return dictionary, termsim_index, pubmed_wordmodel
 
 def create_models(dictionary, combined_corpus, termsim_index):
     """
@@ -165,13 +158,9 @@ def main():
     archive_dir = os.path.join(base_dir, 'data')
     models_dir = os.path.join(base_dir, 'models')
     config_dir = os.path.join(base_dir, 'config')
-    expected_model_location = os.path.join(models_dir, 'pubmed2018_w2v_200D.bin')
-    
-    lang_helper.load_file_from_s3(origin_path='lang_processing/gensim-data/pubmed2018_w2v_200D/pubmed2018_w2v_200D.bin',
-                                 final_path=expected_model_location)
 
-    # Load dictionary
-    dictionary, termsim_index = load_models(models_dir)
+    # Load dictionary and models
+    dictionary, termsim_index, pubmed_wordmodel = load_models(models_dir)
     
     # Read feeds from file
     feeds_file = os.path.join(config_dir, 'feeds.txt')
@@ -188,6 +177,10 @@ def main():
 
     # Add new documents to dictionary
     dictionary.add_documents(tokenized_pubs)
+    
+    # Filter dictionary to only include terms present in the PubMed word model
+    # This prevents KeyError when SparseTermSimilarityMatrix tries to access tfidf.idfs
+    dictionary.filter_tokens(bad_ids=[tokenid for tokenid, term in dictionary.items() if term not in pubmed_wordmodel])
     
     # Load library with cluster information
     papers_library = load_analyzed_library(archive_dir)

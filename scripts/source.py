@@ -69,8 +69,10 @@ class Paper:
         self.pages = row['pages']
         self.issue = row['issue']
         self.volume = row['volume']
-        self.cluster_id = None
-        self.silhouette_score = None
+        
+        # Load cluster_id and silhouette_score if they exist in the row
+        self.cluster_id = row.get('cluster_id', None)
+        self.silhouette_score = row.get('silhouette_score', None)
 
 class Library:
     def __init__(self):
@@ -90,7 +92,36 @@ def get_stop(stop_method='nltk'):
     return stop_words
         
 
+def filter_library(library, type='title'):
+    """
+    Filter library to only include papers with valid titles or abstracts.
+    
+    Args:
+        library: Library object containing papers
+        type: Type of content to check ('title' or 'abstract')
+        
+    Returns:
+        Library object with only valid papers
+    """
+    filtered_library = Library()
+    for paper in library.papers:
+        if type == 'title':
+            if not (isinstance(paper.title, float) and np.isnan(paper.title)):
+                filtered_library.papers.append(paper)
+        elif type == 'abstract':
+            if not (isinstance(paper.abstract, float) and np.isnan(paper.abstract)):
+                filtered_library.papers.append(paper)
+    return filtered_library
+
 def tokenize_library(library, stop_method='nltk', type='title'):
+    """
+    Tokenize library papers.
+    
+    Args:
+        library: Library object
+        stop_method: Method for stopword removal
+        type: Type of content to tokenize ('title' or 'abstract')
+    """
     ##Get stopword corpus
     stop_words = get_stop(stop_method=stop_method)
         
@@ -195,28 +226,50 @@ def tokenize_pubmed(email, past_days, stop_method='nltk', max_results=1000, pub_
     
     return abstracts, tokenized_texts
 
-def load_recent_library(directory):
+def get_recent_library(directory):
     today = datetime.today().date()
     library_paths = glob.glob(f"{directory}/????_??_??_papers_library.csv")
+    
+    if not library_paths:
+        print(f"No library files found in {directory}")
+        return None
 
     ##Initalize variables for selecting most recent archive
     closest_archive = None
     min_diff = float("inf")
     for path in library_paths:
-        archive = os.path.basename(path)
-        date_str = archive[:10]  # First 10 characters (YYYY_MM_DD)
-        archive_date = datetime.strptime(date_str, "%Y_%m_%d").date()
-        # Compute days since the archive
-        diff = abs((archive_date - today).days)
+        try:
+            archive = os.path.basename(path)
+            date_str = archive[:10]  # First 10 characters (YYYY_MM_DD)
+            archive_date = datetime.strptime(date_str, "%Y_%m_%d").date()
+            # Compute days since the archive
+            diff = abs((archive_date - today).days)
 
-        if diff < min_diff:
-            min_diff = diff
-            closest_archive = path
+            if diff < min_diff:
+                min_diff = diff
+                closest_archive = path
+        except ValueError:
+            print(f"Warning: Skipping file with invalid date format: {path}")
+            continue
 
-    loaded_library = Library()
-    loaded_library.load(closest_archive)
+    return closest_archive
 
-    return loaded_library
+def load_library(library_path):
+    if not os.path.exists(library_path):
+        print(f"Error: Library file not found: {library_path}")
+        return None
+    
+    try:
+        lib = pd.read_csv(library_path)
+        library = Library()
+        for _, row in lib.iterrows():
+            paper = Paper()
+            paper.load_from_row(row)
+            library.papers.append(paper)
+        return library
+    except Exception as e:
+        print(f"Error loading library: {str(e)}")
+        return None
 
 def load_file_from_s3(origin_path, final_path, endpoint_url='https://nyc3.digitaloceanspaces.com', bucket='phillygenome-space'):
     """Load a file from S3 if it doesn't exist locally."""
@@ -1220,24 +1273,16 @@ def load_or_create_models(papers_library, pubmed_wordmodel, model_path, overwrit
     
     return dictionary, bow_corpus, model_tfidf, termsim_matrix
 
-def save_models(dictionary, model_tfidf, termsim_matrix, model_path, papers_library):
+def save_papers_library(papers_library, output_dir):
     """
-    Save the models and analysis results to the specified directory.
+    Save the papers library with cluster assignments to the specified output directory.
     
     Args:
-        dictionary: Gensim dictionary
-        model_tfidf: TF-IDF model
-        termsim_matrix: Term similarity matrix
-        model_path: Directory to save models
         papers_library: Library object containing papers with cluster assignments
+        output_dir: Directory to save the papers library
     """
     # Create output directory if it doesn't exist
-    os.makedirs(model_path, exist_ok=True)
-    
-    # Save models
-    dictionary.save(os.path.join(model_path, 'dictionary.gensim'))
-    model_tfidf.save(os.path.join(model_path, 'model_tfidf.gensim'))
-    termsim_matrix.save(os.path.join(model_path, 'termsim_matrix.gensim'))
+    os.makedirs(output_dir, exist_ok=True)
     
     # Save papers library with cluster assignments
     papers_data = []
@@ -1276,9 +1321,80 @@ def save_models(dictionary, model_tfidf, termsim_matrix, model_path, papers_libr
     
     # Save as CSV
     df = pd.DataFrame(papers_data)
-    df.to_csv(os.path.join(model_path, 'papers_library_with_clusters.csv'), index=False)
+    df.to_csv(os.path.join(output_dir, 'papers_library_with_clusters.csv'), index=False)
     
     # Save as JSON
     import json
-    with open(os.path.join(model_path, 'papers_library_with_clusters.json'), 'w') as f:
+    with open(os.path.join(output_dir, 'papers_library_with_clusters.json'), 'w') as f:
         json.dump(papers_data, f, indent=2)
+    
+    print(f"Papers library saved to {output_dir}")
+
+def save_models(dictionary, model_tfidf, termsim_matrix, model_path):
+    """
+    Save the models to the specified directory.
+    
+    Args:
+        dictionary: Gensim dictionary
+        model_tfidf: TF-IDF model
+        termsim_matrix: Term similarity matrix
+        model_path: Directory to save models
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(model_path, exist_ok=True)
+    
+    # Save models
+    dictionary.save(os.path.join(model_path, 'dictionary.gensim'))
+    model_tfidf.save(os.path.join(model_path, 'model_tfidf.gensim'))
+    termsim_matrix.save(os.path.join(model_path, 'termsim_matrix.gensim'))
+    
+    print(f"Models saved to {model_path}")
+
+def clean_and_split_term(term, wordmodel):
+
+    if not isinstance(term, str):
+        return []
+
+    # Step 1: Shortcut — return original if already in model
+    if term in wordmodel:
+        return [term]
+
+    # Step 2: Unescape HTML entities and normalize known punctuation
+    term = html.unescape(term)
+    replacements = {
+        '’': "'", '‘': "'", '“': '"', '”': '"',
+        '–': '-', '—': '-', '′': "'", '•': '*',
+        '\xa0': ' ',
+    }
+    for src, tgt in replacements.items():
+        term = term.replace(src, tgt)
+
+    # Remove HTML tags
+    term = re.sub(r'<[^>]+>', '', term)
+
+    # Lowercase and trim
+    term = term.lower().strip(string.punctuation + string.whitespace + "\"'")
+
+    # Step 3: Try stripping possessive 's and rechecking
+    if term.endswith("'s") and term[:-2] in wordmodel:
+        return [term[:-2]]
+    elif term.endswith("’s") and term[:-2] in wordmodel:
+        return [term[:-2]]
+
+    # Step 4: If slash or hyphen present, try splitting
+    if '/' in term and term not in wordmodel:
+        parts = term.split('/')
+    elif '-' in term and term not in wordmodel:
+        parts = term.split('-')
+    else:
+        parts = term.split()
+
+    # Step 5: Validate and return any model-covered subparts
+    cleaned_parts = []
+    for part in parts:
+        part = part.strip(string.punctuation + string.whitespace + "\"'")
+        if part and re.match(r"^[a-z0-9']+$", part):
+            if part in wordmodel:
+                cleaned_parts.append(part)
+
+    return cleaned_parts
