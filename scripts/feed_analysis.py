@@ -56,17 +56,13 @@ def create_models(dictionary, combined_corpus, termsim_index):
     
     return model_tfidf, termsim_matrix
 
-def process_feeds(feeds, include_read):
+def process_feeds(feeds, include_read, pubmed_wordmodel):
     """
     Process the RSS feeds and tokenize the publications.
     """
-    # Check feeds
     lang_helper.check_feeds(feeds)
-    
-    # Tokenize feeds
-    pubs, tokenized_pubs = lang_helper.tokenize_feeds(feeds, type='title', include_read=include_read)
+    pubs, tokenized_pubs = lang_helper.tokenize_feeds(feeds, type='title', include_read=include_read, wordmodel=pubmed_wordmodel)
     print(f"\nInitial number of papers from feeds: {len(pubs)}")
-    
     return pubs, tokenized_pubs
 
 def generate_and_send_email(email, pubs, papers, bow_corpus, similarity_matrix, dictionary, include_read_items=False):
@@ -151,6 +147,8 @@ def main():
                         help='Include already read items in recommendations')
     parser.add_argument('--target-email', type=str, default=os.getenv('TARGET_EMAIL'),
                         help='Email address to send the recommendations to')
+    parser.add_argument('--html-email', action='store_true', default=False,
+                        help='Send email in HTML format instead of plain text')
     args = parser.parse_args()
 
     # Set up directory paths
@@ -170,7 +168,7 @@ def main():
     print(f"\nNumber of feeds: {len(feeds)}")
     
     # Get new publications
-    pubs, tokenized_pubs = process_feeds(feeds, args.include_read)
+    pubs, tokenized_pubs = process_feeds(feeds, args.include_read, pubmed_wordmodel)
     
     # Save new publications to pubs_reviewed.csv
     lang_helper.save_sent_papers(pubs)
@@ -184,7 +182,7 @@ def main():
     
     # Load library with cluster information
     papers_library = load_analyzed_library(archive_dir)
-    tokenized_library = lang_helper.tokenize_library(papers_library, type='title')
+    tokenized_library = lang_helper.tokenize_library(papers_library, type='title', wordmodel=pubmed_wordmodel)
     print(f"\nNumber of papers in library: {len(papers_library.papers)}")
     
     # Create bow corpora
@@ -212,14 +210,23 @@ def main():
     else:
         print("\nNo cluster preferences found, including all clusters")
     
+    # Match topics to publications
+    topic_results = lang_helper.match_topics_to_publications(pubs, papers_library.papers, topic_pubs_similarity_matrix, included_clusters=included_clusters)
+    
     # Generate email
-    email_message = lang_helper.draft_email(pubs, papers_library.papers, corpus_library, topic_pubs_similarity_matrix, dictionary, included_clusters=included_clusters)
+    if args.html_email:
+        email_message = lang_helper.draft_html_email(pubs, papers_library.papers, corpus_library, topic_pubs_similarity_matrix, dictionary, topic_results)
+    else:
+        email_message = lang_helper.draft_plaintext_email(pubs, papers_library.papers, corpus_library, topic_pubs_similarity_matrix, dictionary, topic_results)
 
     # Send email
     if not args.target_email:
         raise ValueError("TARGET_EMAIL environment variable not set")
     else:
-        lang_helper.send_email_with_Web_API(email_message, args.target_email)
+        if args.html_email:
+            lang_helper.send_email_with_Web_API(email_message, args.target_email, html_content=email_message)
+        else:
+            lang_helper.send_email_with_Web_API(email_message, args.target_email)
 
 if __name__ == "__main__":
     main() 

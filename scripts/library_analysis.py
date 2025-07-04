@@ -21,8 +21,10 @@ import seaborn as sns
 from io import BytesIO
 from reportlab.platypus import Image
 from datetime import datetime
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import squareform
 
-def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, window_size=50, step_size=50, verbose=False):
+def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, window_size=50, step_size=50, verbose=False, silhouette_scores=None, inertias=None, best_n_silhouette=None, best_n_elbow=None, num_clusters=None, model_tfidf=None):
     """
     Generate a PDF report analyzing the library clusters and a simple text file for feed search preferences.
     
@@ -34,6 +36,12 @@ def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, win
         window_size: Number of papers in each analysis window
         step_size: Number of papers to step forward for each window
         verbose: Whether to print detailed debugging information
+        silhouette_scores: Dictionary of silhouette scores for different cluster numbers
+        inertias: Dictionary of inertia values for different cluster numbers
+        best_n_silhouette: Best silhouette score and corresponding cluster number
+        best_n_elbow: Elbow method suggests this number of clusters
+        num_clusters: Optional number of clusters to add to plots
+        model_tfidf: Trained Gensim TfidfModel for feature extraction
     """
     
     # Initialize ClusterTracker and RollingClusterAnalyzer
@@ -155,28 +163,55 @@ def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, win
     story.append(t)
     story.append(Spacer(1, 20))
     
-    # Topic Evolution Analysis
-    story.append(Paragraph("Topic Evolution Analysis", styles['Heading2']))
+    # Topic Identification Analysis
+    story.append(Paragraph("Topic Identification Analysis", styles['Heading2']))
     story.append(Spacer(1, 12))
     
-    # Create a two-column layout for evolution analysis
-    evolution_data = []
-    evolution_data.append([Paragraph("Cluster Frequencies by Window:", styles['Heading3']), ""])
+    # Create a 2x1 subplot layout for cluster quality analysis
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
     
-    for i, window in enumerate(window_labels):
-        window_text = f"\n{window}:"
-        for j, cluster_id in enumerate(cluster_ids):
-            if frequencies[i, j] > 0:  # Only show clusters with papers
-                window_text += f"\n  Cluster {cluster_id}: {frequencies[i, j]:.2%}"
-        evolution_data.append([Paragraph(window_text, styles['Normal']), ""])
+    # Left subplot: Silhouette scores
+    cluster_numbers = list(silhouette_scores.keys())
+    scores = list(silhouette_scores.values())
     
-    # Add evolution data to story
-    for row in evolution_data:
-        story.append(row[0])
-        story.append(Spacer(1, 6))
+    ax1.plot(cluster_numbers, scores, 'bo-', linewidth=2, markersize=8)
+    ax1.axvline(x=best_n_silhouette, color='red', linestyle='--', linewidth=2, label=f'Best Silhouette: {best_n_silhouette} clusters')
+    if num_clusters is not None and num_clusters != best_n_silhouette:
+        ax1.axvline(x=num_clusters, color='blue', linestyle='--', linewidth=2, label=f'Manual: {num_clusters} clusters')
+    ax1.set_xlabel('Number of Clusters')
+    ax1.set_ylabel('Silhouette Score')
+    ax1.set_title(f'Cluster Quality: Silhouette Scores\nBest: {best_n_silhouette} clusters (score: {silhouette_scores[best_n_silhouette]:.3f})')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
     
-    # Visualizations
-    story.append(Paragraph("Visualizations", styles['Heading2']))
+    # Right subplot: Elbow plot (inertia/within-cluster sum of squares)
+    inertia_clusters = list(inertias.keys())
+    inertia_values = list(inertias.values())
+    
+    ax2.plot(inertia_clusters, inertia_values, 'ro-', linewidth=2, markersize=8)
+    ax2.axvline(x=best_n_elbow, color='red', linestyle='--', linewidth=2, label=f'Elbow Point: {best_n_elbow} clusters')
+    if num_clusters is not None and num_clusters != best_n_elbow:
+        ax2.axvline(x=num_clusters, color='blue', linestyle='--', linewidth=2, label=f'Manual: {num_clusters} clusters')
+    ax2.set_xlabel('Number of Clusters')
+    ax2.set_ylabel('Within-Cluster Sum of Squares')
+    ax2.set_title(f'Cluster Quality: Elbow Method\nOptimal: {best_n_elbow} clusters')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    # Save to BytesIO buffer
+    silhouette_buffer = BytesIO()
+    plt.savefig(silhouette_buffer, format='png', dpi=300, bbox_inches='tight')
+    silhouette_buffer.seek(0)
+    plt.close()
+    
+    # Add silhouette plot to PDF
+    story.append(Image(silhouette_buffer, width=650, height=325))
+    story.append(Spacer(1, 20))
+    
+    # Topic Evolution Analysis
+    story.append(Paragraph("Topic Evolution Analysis", styles['Heading2']))
     story.append(Spacer(1, 12))
     
     # Create cluster frequencies visualization with larger size for landscape
@@ -191,9 +226,44 @@ def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, win
     plt.close()
     
     # Add to PDF with adjusted size for landscape
-    story.append(Paragraph("Cluster Frequencies", styles['Heading3']))
-    story.append(Spacer(1, 6))
     story.append(Image(img_buffer, width=650, height=325))
+
+    # --- Per-cluster WCSS calculation and graphing (final clustering only) ---
+    if model_tfidf is not None:
+        cluster_ids = np.unique([p.cluster_id for p in papers_library.papers if p.cluster_id is not None])
+        tfidf_vectors = [model_tfidf[bow] for bow in bow_corpus]
+        vocab_size = len(dictionary)
+        tfidf_dense = np.zeros((len(tfidf_vectors), vocab_size))
+        for i, vec in enumerate(tfidf_vectors):
+            for idx, val in vec:
+                tfidf_dense[i, idx] = val
+        wcss_per_cluster = []
+        cluster_labels = np.array([p.cluster_id for p in papers_library.papers])
+        for cluster in cluster_ids:
+            indices = np.where(cluster_labels == cluster)[0]
+            if len(indices) == 0:
+                wcss_per_cluster.append(0)
+                continue
+            cluster_vecs = tfidf_dense[indices]
+            centroid = cluster_vecs.mean(axis=0)
+            sq_dists = np.sum((cluster_vecs - centroid) ** 2, axis=1)
+            wcss = np.sum(sq_dists)
+            wcss_per_cluster.append(wcss)
+        plt.figure(figsize=(10, 4))
+        plt.bar([f'Cluster {c}' for c in cluster_ids], wcss_per_cluster, color='teal')
+        plt.ylabel('Within-Cluster Sum of Squares (WCSS)')
+        plt.xlabel('Cluster')
+        plt.title('WCSS for Each Cluster')
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        wcss_buffer = BytesIO()
+        plt.savefig(wcss_buffer, format='png', dpi=300, bbox_inches='tight')
+        wcss_buffer.seek(0)
+        plt.close()
+        story.append(Paragraph("Per-Cluster Tightness (WCSS)", styles['Heading2']))
+        story.append(Spacer(1, 12))
+        story.append(Image(wcss_buffer, width=650, height=250))
+    # --- End WCSS ---
     
     # Build PDF
     doc.build(story)
@@ -211,10 +281,16 @@ def main():
     parser = argparse.ArgumentParser(description='Analyze library clusters and generate reports.')
     parser.add_argument('--library', type=str, help='Path to specific library file (optional)')
     parser.add_argument('--clustering_method', type=str, default='ward', help='Clustering method (ward or complete)')
+    parser.add_argument('--max-clusters', type=int, default=20,
+                       help='Maximum number of clusters to try during optimization analysis(default: 20)')
     parser.add_argument('--window_size', type=int, default=50, help='Number of papers in each analysis window')
     parser.add_argument('--step_size', type=int, default=50, help='Number of papers to step forward for each window')
-    parser.add_argument('--verbose', action='store_true', help='Print detailed debugging information')
+    parser.add_argument('--verbose', action='store_true', help='Print verbose output')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing models')
+    parser.add_argument('--num-clusters', type=str, default='auto',
+                       help="Number of clusters to use. If 'auto', will optimize using --optimization-algorithm. Otherwise, provide an integer.")
+    parser.add_argument('--optimization-algorithm', choices=['silhouette', 'elbow'], default='silhouette',
+                       help="Algorithm to use for cluster number optimization if --num-clusters is 'auto'.")
     args = parser.parse_args()
 
     # Set default paths for library file and model path
@@ -248,40 +324,69 @@ def main():
     
     # Filter library and tokenize
     filtered_library = lang_helper.filter_library(papers_library, type='title')
-    tokenized_library = lang_helper.tokenize_library(filtered_library)
+    tokenized_library = lang_helper.tokenize_library(filtered_library, wordmodel=pubmed_wordmodel)
     bow_corpus = [dictionary.doc2bow(text) for text in tokenized_library]
     
-    # Cluster library
-    optimal_n, silhouette_scores = lang_helper.cluster_library(bow_corpus, termsim_matrix, filtered_library,
-                                                     method=args.clustering_method, verbose=args.verbose)
-    
+    # Compute similarity matrix once
+    similarity_matrix = lang_helper.get_cosine_matrix(termsim_matrix, bow_corpus, bow_corpus)
+
+    # Always run optimization to get curves for both methods
+    silhouette_opt_n, silhouette_scores, inertias, best_n_silhouette, best_n_elbow = lang_helper.find_optimal_clusters(
+        similarity_matrix,
+        max_clusters=args.max_clusters, method='silhouette', linkage_method=args.clustering_method)
+
+    # Determine number of clusters for actual clustering
+    if args.num_clusters != 'auto':
+        try:
+            num_clusters = int(args.num_clusters)
+        except ValueError:
+            print("Error: --num-clusters must be an integer or 'auto'.")
+            return
+        optimal_n = num_clusters
+    else:
+        num_clusters = None
+        optimal_n = best_n_silhouette if args.optimization_algorithm == 'silhouette' else best_n_elbow
+
+    # Cluster library using the chosen number of clusters
+    lang_helper.compute_topics(similarity_matrix, filtered_library.papers, method=args.clustering_method, num_topics=optimal_n, verbose=args.verbose)
+
     # Print clustering results
-    print(f"Optimal number of clusters: {optimal_n}")
-    print(f"Silhouette score for {optimal_n} clusters: {silhouette_scores[optimal_n]:.3f}")
-    
+    print(f"Number of clusters used: {optimal_n}")
+ 
+
     # Save models (only if overwrite is True)
     if args.overwrite:
         print("Saving models...")
         lang_helper.save_models(dictionary, model_tfidf, termsim_matrix, model_path)
-    
+
     # Create output directory
     output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output')
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Create timestamped folder inside output directory
     timestamp = datetime.now().strftime('%Y_%m_%d_%H%M%S')
     run_dir = os.path.join(output_dir, timestamp)
     os.makedirs(run_dir, exist_ok=True)
-    
+
+    # Save run parameters to a text file
+    run_params_file = os.path.join(run_dir, 'run_parameters.txt')
+    with open(run_params_file, 'w') as f:
+        f.write('Run parameters for this analysis:\n')
+        for arg, value in vars(args).items():
+            f.write(f'{arg}: {value}\n')
+
     # Generate report
     print("Generating analysis report...")
     generate_cluster_report(filtered_library, bow_corpus, dictionary, run_dir,
-                          window_size=args.window_size, step_size=args.step_size, verbose=args.verbose)
-    
+                          window_size=args.window_size, step_size=args.step_size, verbose=args.verbose,
+                          silhouette_scores=silhouette_scores, inertias=inertias, 
+                          best_n_silhouette=best_n_silhouette, best_n_elbow=best_n_elbow,
+                          num_clusters=num_clusters, model_tfidf=model_tfidf)
+
     # Save papers library to output directory
     print("Saving papers library...")
     lang_helper.save_papers_library(filtered_library, run_dir)
-    
+
     print("Analysis complete!")
 
 if __name__ == "__main__":

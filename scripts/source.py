@@ -24,6 +24,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import silhouette_score, silhouette_samples
 from scipy.spatial.distance import squareform
+import re
+import html
+import string
 
 load_dotenv('/home/jeff/data_server_home/DS_projects/literature_analysis/.env')
 
@@ -69,10 +72,8 @@ class Paper:
         self.pages = row['pages']
         self.issue = row['issue']
         self.volume = row['volume']
-        
-        # Load cluster_id and silhouette_score if they exist in the row
-        self.cluster_id = row.get('cluster_id', None)
-        self.silhouette_score = row.get('silhouette_score', None)
+        self.cluster_id = None
+        self.silhouette_score = None
 
 class Library:
     def __init__(self):
@@ -113,7 +114,7 @@ def filter_library(library, type='title'):
                 filtered_library.papers.append(paper)
     return filtered_library
 
-def tokenize_library(library, stop_method='nltk', type='title'):
+def tokenize_library(library, stop_method='nltk', type='title', wordmodel=None):
     """
     Tokenize library papers.
     
@@ -121,24 +122,34 @@ def tokenize_library(library, stop_method='nltk', type='title'):
         library: Library object
         stop_method: Method for stopword removal
         type: Type of content to tokenize ('title' or 'abstract')
+        wordmodel: Word embedding model for cleaning and splitting terms
     """
-    ##Get stopword corpus
     stop_words = get_stop(stop_method=stop_method)
         
     tokenized_texts = []
     if (type == 'abstract'):
         for paper in library.papers:
-            if not(isinstance(paper.abstract, float) and np.isnan(paper.abstract)): 
-                tokenized_texts.append(paper.abstract.lower().split())
+            if not(isinstance(paper.abstract, float) and np.isnan(paper.abstract)):
+                words = paper.abstract.lower().split()
+                if wordmodel is not None:
+                    cleaned_words = []
+                    for word in words:
+                        cleaned_words.extend(clean_and_split_term(word, wordmodel))
+                    words = cleaned_words
+                tokenized_texts.append([word for word in words if word not in stop_words])
     elif (type == 'title'):
         for paper in library.papers:
-            if not(isinstance(paper.title, float) and np.isnan(paper.title)): 
-                tokenized_texts.append(paper.title.lower().split())
-    tokenized_texts =[[word for word in doc if word not in stop_words] for doc in tokenized_texts]
-    
+            if not(isinstance(paper.title, float) and np.isnan(paper.title)):
+                words = paper.title.lower().split()
+                if wordmodel is not None:
+                    cleaned_words = []
+                    for word in words:
+                        cleaned_words.extend(clean_and_split_term(word, wordmodel))
+                    words = cleaned_words
+                tokenized_texts.append([word for word in words if word not in stop_words])
     return tokenized_texts
 
-def tokenize_feeds(feeds, stop_method='nltk', type='title', include_read=False):
+def tokenize_feeds(feeds, stop_method='nltk', type='title', include_read=False, wordmodel=None):
     ##Get stopword corpus
     stop_words = get_stop(stop_method=stop_method)
     
@@ -160,13 +171,25 @@ def tokenize_feeds(feeds, stop_method='nltk', type='title', include_read=False):
         included_pubs = [pub for pub in pubs if get_paper_id(pub) not in sent_papers]
         
     print(f"Number of included papers: {len(included_pubs)}")
-
+    tokenized_texts = []
     if (type == 'title'):
-        tokenized_texts = [pub.title.lower().split() for pub in included_pubs]
+        for pub in included_pubs:
+            words = pub.title.lower().split()
+            if wordmodel is not None:
+                cleaned_words = []
+                for word in words:
+                    cleaned_words.extend(clean_and_split_term(word, wordmodel))
+                words = cleaned_words
+            tokenized_texts.append([word for word in words if word not in stop_words])
     elif (type == 'abstract'):
-        tokenized_text = [pub.abstract.lower().split() for pub in included_pubs]
-    tokenized_texts =[[word for word in doc if word not in stop_words] for doc in tokenized_texts]
-    
+        for pub in included_pubs:
+            words = pub.abstract.lower().split()
+            if wordmodel is not None:
+                cleaned_words = []
+                for word in words:
+                    cleaned_words.extend(clean_and_split_term(word, wordmodel))
+                words = cleaned_words
+            tokenized_texts.append([word for word in words if word not in stop_words])
     return included_pubs, tokenized_texts
 
 def tokenize_pubmed(email, past_days, stop_method='nltk', max_results=1000, pub_types=None):
@@ -290,7 +313,7 @@ def load_file_from_s3(origin_path, final_path, endpoint_url='https://nyc3.digita
 
     s3_client.download_file(bucket, origin_path, final_path)
 
-def cluster_library(bow_corpus, termsim_matrix, papers_library, method='ward', verbose=False):
+def cluster_library(bow_corpus, termsim_matrix, papers_library, method='ward', verbose=False, optimization_algorithm='silhouette', max_clusters=20, num_clusters=None):
     """
     Cluster the library and find optimal number of clusters.
     
@@ -300,23 +323,38 @@ def cluster_library(bow_corpus, termsim_matrix, papers_library, method='ward', v
         papers_library: Library object containing papers to cluster
         method: Clustering method ('ward' or 'complete')
         verbose: Whether to print detailed debugging information
+        optimization_algorithm: Method for selecting optimal clusters ('silhouette' or 'elbow')
+        max_clusters: Maximum number of clusters to try
+        num_clusters: If set, use this number of clusters directly (skip optimization)
     
     Returns:
         optimal_n: Optimal number of clusters
         silhouette_scores: Silhouette scores for different cluster numbers
+        inertias: Inertia values for different cluster numbers
+        best_n_silhouette: Best number of clusters according to silhouette scores
+        best_n_elbow: Best number of clusters according to elbow method
     """
     # Get similarity matrix
     similarity_matrix = get_cosine_matrix(termsim_matrix, bow_corpus, bow_corpus)
     if verbose:
         print(f"Similarity matrix shape: {similarity_matrix.shape}")
     
-    # Find optimal clusters
-    optimal_n, silhouette_scores = find_optimal_clusters(similarity_matrix, method=method)
+    if num_clusters is not None:
+        # Use the specified number of clusters directly
+        optimal_n = num_clusters
+        silhouette_scores = {}
+        inertias = {}
+        best_n_silhouette = None
+        best_n_elbow = None
+    else:
+        # Find optimal clusters
+        optimal_n, silhouette_scores, inertias, best_n_silhouette, best_n_elbow = find_optimal_clusters(
+            similarity_matrix, max_clusters=max_clusters, method=optimization_algorithm, linkage_method=method)
     
     # Compute topics and assign to papers
     compute_topics(similarity_matrix, papers_library.papers, method=method, num_topics=optimal_n, verbose=verbose)
     
-    return optimal_n, silhouette_scores
+    return optimal_n, silhouette_scores, inertias, best_n_silhouette, best_n_elbow
 
 def get_cosine_matrix(termsim_matrix, bow_i, bow_j, normalized_value=(True, True)):
     """
@@ -481,7 +519,7 @@ def send_email_with_SMTP(message, to_address):
     except Exception as e:
         print(f"Failed to send email: {e}")
         
-def send_email_with_Web_API(message, to_address):
+def send_email_with_Web_API(message, to_address, html_content=None):
     # Email configuration
     SENDGRID_API_KEY = os.getenv('SG_API_KEY')
     FROM_EMAIL = "bot@phillygenome.xyz"
@@ -490,12 +528,21 @@ def send_email_with_Web_API(message, to_address):
     BODY = message
 
     # Create the email message
-    msg = Mail(
-        from_email=FROM_EMAIL,
-        to_emails=TO_EMAIL,
-        subject=SUBJECT,
-        plain_text_content=BODY
-    )
+    if html_content:
+        msg = Mail(
+            from_email=FROM_EMAIL,
+            to_emails=TO_EMAIL,
+            subject=SUBJECT,
+            plain_text_content=BODY,
+            html_content=html_content
+        )
+    else:
+        msg = Mail(
+            from_email=FROM_EMAIL,
+            to_emails=TO_EMAIL,
+            subject=SUBJECT,
+            plain_text_content=BODY
+        )
 
     try:
         # Create SendGrid client
@@ -571,17 +618,21 @@ def get_paper_id(pub):
     else:
         return f"link:{pub.link}"
 
-def draft_email(pubs, papers, bow_corpus, similarity_matrix, dictionary, included_clusters=None):
+def match_topics_to_publications(pubs, papers, similarity_matrix, included_clusters=None):
     """
-    Draft an email with publication recommendations.
+    Match publications to topics based on similarity scores.
     
     Args:
         pubs: List of publications to recommend
         papers: List of Paper objects with cluster IDs
-        bow_corpus: Bag of words corpus for new publications
         similarity_matrix: Similarity matrix between papers and publications
-        dictionary: Gensim dictionary
         included_clusters: List of cluster IDs to include in recommendations
+        
+    Returns:
+        dict: Dictionary containing topic matching results
+            - 'topic_pubs': {topic_id: [list of publications]}
+            - 'pub_best_score': {publication: best_similarity_score}
+            - 'unique_clusters': [list of cluster IDs]
     """
     # Get unique clusters from papers
     unique_clusters = sorted(set(paper.cluster_id for paper in papers))
@@ -592,7 +643,11 @@ def draft_email(pubs, papers, bow_corpus, similarity_matrix, dictionary, include
     
     # If no new papers, return early
     if not pubs:
-        return "No new publications this week.\n"
+        return {
+            'topic_pubs': {},
+            'pub_best_score': {},
+            'unique_clusters': unique_clusters
+        }
 
     print(f"\nTotal papers to process: {len(pubs)}")
     print(f"Number of clusters to check: {len(unique_clusters)}")
@@ -639,6 +694,32 @@ def draft_email(pubs, papers, bow_corpus, similarity_matrix, dictionary, include
     print("\nSummary of papers per topic:")
     for topic in unique_clusters:
         print(f"Topic {topic}: {len(topic_pubs[topic])} papers")
+    
+    return {
+        'topic_pubs': topic_pubs,
+        'pub_best_score': pub_best_score,
+        'unique_clusters': unique_clusters
+    }
+
+def draft_plaintext_email(pubs, papers, bow_corpus, similarity_matrix, dictionary, topic_results):
+    """
+    Draft an email with publication recommendations.
+    
+    Args:
+        pubs: List of publications to recommend
+        papers: List of Paper objects with cluster IDs
+        bow_corpus: Bag of words corpus for new publications
+        similarity_matrix: Similarity matrix between papers and publications
+        dictionary: Gensim dictionary
+        topic_results: Dictionary containing topic matching results from match_topics_to_publications
+    """
+    topic_pubs = topic_results['topic_pubs']
+    pub_best_score = topic_results['pub_best_score']
+    unique_clusters = topic_results['unique_clusters']
+    
+    # If no new papers, return early
+    if not pubs:
+        return "No new publications this week.\n"
 
     # Generate the email content
     email_message = "Your literature digest for this week\n"
@@ -659,7 +740,7 @@ def draft_email(pubs, papers, bow_corpus, similarity_matrix, dictionary, include
             # Format all topic keywords with their scores
             topic_desc = "*Because you've been reading about a topic with these keywords: ["
             for keyword, score in topic_keys:
-                topic_desc += f"{keyword} ({score:.4f}), "
+                topic_desc += f"{keyword}, "
             topic_desc += "]\n"
             section_matches += topic_desc
             
@@ -687,6 +768,99 @@ def draft_email(pubs, papers, bow_corpus, similarity_matrix, dictionary, include
     email_message += section_matches + section_no_matches
     
     return email_message
+
+def draft_html_email(pubs, papers, bow_corpus, similarity_matrix, dictionary, topic_results):
+    """
+    Draft an HTML email with publication recommendations.
+    
+    Args:
+        pubs: List of publications to recommend
+        papers: List of Paper objects with cluster IDs
+        bow_corpus: Bag of words corpus for new publications
+        similarity_matrix: Similarity matrix between papers and publications
+        dictionary: Gensim dictionary
+        topic_results: Dictionary containing topic matching results from match_topics_to_publications
+    """
+    topic_pubs = topic_results['topic_pubs']
+    pub_best_score = topic_results['pub_best_score']
+    unique_clusters = topic_results['unique_clusters']
+    
+    # If no new papers, return early
+    if not pubs:
+        return "<html><body><p>No new publications this week.</p></body></html>"
+
+    # Generate the HTML email content
+    html_message = """
+    <html>
+    <head>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }
+            h1 { color: #2c3e50; border-bottom: 10px solid #3498db; padding-bottom: 10px; }
+            h2 { color: #34495e; margin-top: 30px; }
+            .section { margin: 20px 0; padding: 15px; border-left: 4px solid #3498db; background-color: #f8f9fa; }
+            .paper-item { margin: 10px 0; padding: 10px; background-color: white; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+            .paper-title { font-weight: bold; color: #2c3e50; }
+            .paper-journal { color: #7f8c8d; font-style: italic; }
+            .paper-link { color: #3498db; text-decoration: none; }
+            .paper-link:hover { text-decoration: underline; }
+            .keywords { color: #36454f; font-style: italic; }
+            .keyword-token { display: inline-block; background-color: #e3f2fd; color: #1565c0; padding: 2px 8px; margin: 2px; border-radius: 12px; font-size: 0.9em; font-weight: 500; }
+            .divider { border-top: 4px solid #bdc3c7; margin: 20px 0; }
+            .section-header { font-weight: bold; margin-bottom: 14px; font-size: 1.2em; }
+        </style>
+    </head>
+    <body>
+    """
+    
+    html_message += "<h1>Your Literature Digest for This Week</h1>"
+
+    section_matches = "<div class='section'><div class='section-header'>Here is a list of recent publications that match your interest.</div>"
+    section_no_matches = "<div class='section'><div class='section-header'>Here are your interests without a match this week.</div>"
+
+    for cluster in unique_clusters:
+        extracted_corpus = extract_cluster_docs(bow_corpus, papers, cluster_num=cluster)
+        topic_keys = extract_lda_keywords(dictionary, extracted_corpus)
+        matching_pubs = topic_pubs[cluster]  # Get publications that best match this topic
+        
+        if len(matching_pubs) != 0:
+            # Format all topic keywords with their scores
+            topic_desc = "<p class='keywords'><strong>Because you've been reading about a topic with these keywords:</strong> "
+            for keyword, score in topic_keys:
+                topic_desc += f"<span class='keyword-token'>{keyword}</span> "
+            topic_desc += "</p>"
+            section_matches += topic_desc
+            
+            for pub in matching_pubs:
+                if hasattr(pub, 'prism_doi'):
+                    link = f"https://doi.org/{pub.prism_doi}"
+                else:
+                    link = pub.link
+                # Debug: Print what score we're using
+                print(f"\nDisplaying paper: {pub.title}")
+                print(f"Using best score: {pub_best_score[pub]:.3f}")
+                print(f"Matrix score for current cluster: {similarity_matrix[cluster - 1, pubs.index(pub)]:.3f}")
+                
+                similarity_score = pub_best_score[pub]
+                section_matches += f"""
+                <div class='paper-item'>
+                    <div class='paper-title'>{pub.title}</div>
+                    <div class='paper-journal'>{pub.prism_publicationname}</div>
+                    <div><a href="{link}" class='paper-link'>{link}</a></div>
+                </div>
+                """
+            section_matches += "<div class='divider'></div>"
+        else:
+            # Format all keywords for topics without matches
+            topic_desc = "<p class='keywords'><strong>Your topic of interest based on keywords:</strong> "
+            for keyword, score in topic_keys:
+                topic_desc += f"<span class='keyword-token'>{keyword}</span> "
+            topic_desc += "</p>"
+            section_no_matches += topic_desc
+        
+    html_message += section_matches + "</div>" + section_no_matches + "</div>"
+    html_message += "</body></html>"
+    
+    return html_message
 
 def check_feeds(feeds):
     for feed in feeds:
@@ -946,9 +1120,9 @@ class RollingClusterAnalyzer:
             'window_median_dates': window_median_dates
         }
     
-    def visualize_cluster_frequencies(self, papers, figsize=(15, 10), verbose=False):
+    def visualize_cluster_frequencies(self, papers, figsize=(12, 6), verbose=False):
         """
-        Visualize cluster frequencies across windows as a heatmap.
+        Visualize cluster frequencies across windows as a heatmap with improved formatting.
         
         Args:
             papers: List of Paper objects to analyze
@@ -960,25 +1134,38 @@ class RollingClusterAnalyzer:
         frequencies = freq_results['frequencies']
         window_labels = freq_results['window_median_dates']  # Use median dates
         cluster_ids = freq_results['cluster_ids']
-        
-        # Create the heatmap
-        plt.figure(figsize=figsize)
-        sns.heatmap(frequencies.T,  # Transpose to show clusters on y-axis
-                    cmap='viridis',
-                    xticklabels=window_labels,  # Use median dates as x-labels
-                    yticklabels=[f'Cluster {c}' for c in cluster_ids],
-                    cbar_kws={'label': 'Proportion of Cluster Papers'},
-                    annot=True,  # Show values in cells
-                    fmt='.2%',   # Format as percentages with 2 decimal places
-                    annot_kws={'size': 8})  # Adjust annotation font size
-        
-        plt.title('Cluster Distribution Over Time')
-        plt.xlabel('Median Date of Papers in Window')
-        plt.ylabel('Cluster')
-        plt.xticks(rotation=45, ha='right')  # Rotate x-axis labels for better readability
+
+        # Create the heatmap with improved formatting
+        fig, ax = plt.subplots(figsize=figsize)
+        sns.heatmap(
+            frequencies.T,  # Transpose to show clusters on y-axis
+            cmap='viridis',
+            xticklabels=window_labels,  # Use median dates as x-labels
+            yticklabels=[f'Cluster {c}' for c in cluster_ids],
+            cbar_kws={'label': 'Proportion of Cluster Papers', 'shrink': 0.8},
+            annot=False,
+            linewidths=0.5,
+            linecolor='white',
+            ax=ax
+        )
+
+        # Set title and labels with appropriate font sizes
+        ax.set_title('Cluster Distribution Over Time', fontsize=16, pad=20)
+        ax.set_xlabel('Median Date of Papers in Window', fontsize=12, labelpad=10)
+        ax.set_ylabel('Cluster', fontsize=12, labelpad=10)
+
+        # Set y-tick labels (ensure all are visible)
+        ax.set_yticklabels([f'Cluster {i}' for i in cluster_ids], fontsize=10)
+
+        # Set x-tick labels: rotate, reduce number, and font size
+        for label in ax.get_xticklabels():
+            label.set_rotation(45)
+            label.set_fontsize(8)
+        ax.xaxis.set_major_locator(plt.MaxNLocator(15))  # Show max 15 ticks
+
         plt.tight_layout()
-        plt.show()
-        
+        # plt.show()  # Remove to avoid display popups in non-interactive environments
+
         if verbose:
             # Print statistics
             print("\nCluster Statistics:")
@@ -986,7 +1173,6 @@ class RollingClusterAnalyzer:
             print(f"Number of unique clusters: {len(cluster_ids)}")
             print(f"Average proportion per cluster: {np.mean(frequencies):.2f}")
             print(f"Maximum proportion in a cluster: {np.max(frequencies):.2f}")
-            
             # Print detailed frequencies
             print("\nCluster Frequencies by Window:")
             for i, window in enumerate(window_labels):
@@ -1077,18 +1263,49 @@ class ModelCache:
         
         return self.dictionary, tfidf_model, termsim_matrix, bow_corpus
 
-def find_optimal_clusters(similarity_matrix, min_clusters=2, max_clusters=20, method='average'):
+def detect_elbow_point(inertias):
     """
-    Find the optimal number of clusters using silhouette scores.
+    Detect the elbow point in inertia values using the knee/elbow detection algorithm.
+    
+    Args:
+        inertias: Dictionary of {n_clusters: inertia_value}
+        
+    Returns:
+        optimal_n: Number of clusters at the elbow point
+    """
+    cluster_numbers = sorted(inertias.keys())
+    inertia_values = [inertias[n] for n in cluster_numbers]
+    
+    # Calculate the rate of change (first derivative)
+    first_derivative = np.diff(inertia_values)
+    
+    # Calculate the rate of change of the rate of change (second derivative)
+    second_derivative = np.diff(first_derivative)
+    
+    # Find the point of maximum curvature (minimum second derivative)
+    # Add 2 to account for the two diff operations and 1-indexing
+    elbow_idx = np.argmin(second_derivative) + 2
+    
+    # Ensure we don't go out of bounds
+    elbow_idx = min(elbow_idx, len(cluster_numbers) - 1)
+    
+    optimal_n = cluster_numbers[elbow_idx]
+    
+    return optimal_n
+
+def find_optimal_clusters(similarity_matrix, min_clusters=2, max_clusters=20, method='silhouette', linkage_method='average'):
+    """
+    Find the optimal number of clusters using silhouette scores and inertia.
     
     Args:
         similarity_matrix: Similarity matrix (dense)
         min_clusters: Minimum number of clusters to try
         max_clusters: Maximum number of clusters to try
-        method: Linkage method for hierarchical clustering
+        method: Method for selecting optimal clusters ('silhouette' or 'elbow')
+        linkage_method: Linkage method for hierarchical clustering
         
     Returns:
-        Tuple of (optimal number of clusters, dictionary of silhouette scores)
+        Tuple of (optimal number of clusters, dictionary of silhouette scores, dictionary of inertia values, best_n_silhouette, best_n_elbow)
     """
     # Convert similarity to distance
     distance_matrix = 1 - similarity_matrix
@@ -1101,26 +1318,48 @@ def find_optimal_clusters(similarity_matrix, min_clusters=2, max_clusters=20, me
     
     # Try different numbers of clusters
     silhouette_scores = {}
+    inertias = {}
     best_score = -1
-    best_n = min_clusters
+    best_n_silhouette = min_clusters
     
     for n in range(min_clusters, max_clusters + 1):
         # Perform hierarchical clustering
-        linkage_matrix = linkage(condensed_distance, method=method, optimal_ordering=True)
+        linkage_matrix = linkage(condensed_distance, method=linkage_method, optimal_ordering=True)
         clusters = fcluster(linkage_matrix, n, criterion='maxclust')
         
         # Compute silhouette score
         score = silhouette_score(distance_matrix, clusters, metric='precomputed')
         silhouette_scores[n] = score
         
-        # Update best score
+        # Compute inertia (within-cluster sum of squares)
+        inertia = 0
+        for cluster_id in np.unique(clusters):
+            cluster_indices = np.where(clusters == cluster_id)[0]
+            if len(cluster_indices) > 1:
+                cluster_distances = distance_matrix[cluster_indices][:, cluster_indices]
+                inertia += np.sum(cluster_distances) / 2  # Divide by 2 since matrix is symmetric
+        inertias[n] = inertia
+        
+        # Update best silhouette score
         if score > best_score:
             best_score = score
-            best_n = n
+            best_n_silhouette = n
     
-    print(f"\nOptimal number of clusters: {best_n} (score: {best_score:.3f})")
+    # Calculate best_n_elbow
+    best_n_elbow = detect_elbow_point(inertias)
     
-    return best_n, silhouette_scores
+    # Choose optimal number of clusters based on method
+    if method == 'silhouette':
+        optimal_n = best_n_silhouette
+        print(f"\nOptimal number of clusters (silhouette): {optimal_n} (score: {best_score:.3f})")
+    elif method == 'elbow':
+        optimal_n = best_n_elbow
+        print(f"\nOptimal number of clusters (elbow): {optimal_n}")
+        print(f"Silhouette score at elbow: {silhouette_scores[optimal_n]:.3f}")
+    else:
+        raise ValueError("Method must be 'silhouette' or 'elbow'")
+    
+    return optimal_n, silhouette_scores, inertias, best_n_silhouette, best_n_elbow
 
 def compare_clusterings(library1, clusters1, library2, clusters2, similarity_threshold=0.5):
     """
@@ -1378,7 +1617,7 @@ def clean_and_split_term(term, wordmodel):
     # Step 3: Try stripping possessive 's and rechecking
     if term.endswith("'s") and term[:-2] in wordmodel:
         return [term[:-2]]
-    elif term.endswith("’s") and term[:-2] in wordmodel:
+    elif term.endswith("'s") and term[:-2] in wordmodel:
         return [term[:-2]]
 
     # Step 4: If slash or hyphen present, try splitting
