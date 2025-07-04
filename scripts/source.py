@@ -1157,11 +1157,15 @@ class RollingClusterAnalyzer:
         # Set y-tick labels (ensure all are visible)
         ax.set_yticklabels([f'Cluster {i}' for i in cluster_ids], fontsize=10)
 
-        # Set x-tick labels: rotate, reduce number, and font size
-        for label in ax.get_xticklabels():
-            label.set_rotation(45)
-            label.set_fontsize(8)
-        ax.xaxis.set_major_locator(plt.MaxNLocator(15))  # Show max 15 ticks
+        # Explicitly set x-tick labels, limited to 15 evenly spaced dates
+        n_labels = len(window_labels)
+        max_ticks = 15
+        if n_labels > max_ticks:
+            tick_indices = np.linspace(0, n_labels - 1, max_ticks, dtype=int)
+        else:
+            tick_indices = np.arange(n_labels)
+        ax.set_xticks(tick_indices + 0.5)
+        ax.set_xticklabels([window_labels[i] for i in tick_indices], rotation=45, ha='right', fontsize=8)
 
         plt.tight_layout()
         # plt.show()  # Remove to avoid display popups in non-interactive environments

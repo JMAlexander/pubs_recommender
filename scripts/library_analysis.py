@@ -13,7 +13,7 @@ import os
 import argparse
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether, HRFlowable
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import matplotlib.pyplot as plt
@@ -23,10 +23,11 @@ from reportlab.platypus import Image
 from datetime import datetime
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import squareform
+import base64
 
-def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, window_size=50, step_size=50, verbose=False, silhouette_scores=None, inertias=None, best_n_silhouette=None, best_n_elbow=None, num_clusters=None, model_tfidf=None):
+def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, window_size=50, step_size=50, verbose=False, silhouette_scores=None, inertias=None, best_n_silhouette=None, best_n_elbow=None, num_clusters=None, model_tfidf=None, report_mode='pdf'):
     """
-    Generate a PDF report analyzing the library clusters and a simple text file for feed search preferences.
+    Generate a report analyzing the library clusters and a simple text file for feed search preferences.
     
     Args:
         papers_library: List of papers to analyze
@@ -42,6 +43,7 @@ def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, win
         best_n_elbow: Elbow method suggests this number of clusters
         num_clusters: Optional number of clusters to add to plots
         model_tfidf: Trained Gensim TfidfModel for feature extraction
+        report_mode: 'pdf' (default) or 'html' for output format
     """
     
     # Initialize ClusterTracker and RollingClusterAnalyzer
@@ -79,20 +81,46 @@ def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, win
     styles = getSampleStyleSheet()
     story = []
     
-    # Title
-    title_style = ParagraphStyle(
-        'CustomTitle',
+    # Modern styles
+    modern_title_style = ParagraphStyle(
+        'ModernTitle',
         parent=styles['Heading1'],
-        fontSize=24,
-        spaceAfter=30
+        fontName='Helvetica-Bold',
+        fontSize=22,
+        textColor=colors.HexColor("#22223b"),
+        spaceAfter=18,
+        keepWithNext=True,
     )
-    story.append(Paragraph("Library Analysis Report", title_style))
+    modern_section_style = ParagraphStyle(
+        'ModernSection',
+        parent=styles['Heading2'],
+        fontName='Helvetica-Bold',
+        fontSize=16,
+        textColor=colors.HexColor("#4a4e69"),
+        backColor=colors.HexColor("#f2e9e4"),
+        leftIndent=0,
+        spaceBefore=12,
+        spaceAfter=8,
+        keepWithNext=True,
+    )
+    modern_normal = ParagraphStyle(
+        'ModernNormal',
+        parent=styles['Normal'],
+        fontName='Helvetica',
+        fontSize=11,
+        textColor=colors.HexColor("#22223b"),
+        spaceAfter=6,
+    )
+
+    # Title
+    story.append(Paragraph("Library Analysis Report", modern_title_style))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#c9ada7"), spaceBefore=8, spaceAfter=8))
     
     # Create a two-column layout for the overview section
     overview_data = []
     
     # Cluster Overview
-    overview_data.append([Paragraph("Cluster Overview", styles['Heading2']), ""])
+    overview_data.append([Paragraph("Cluster Overview", modern_section_style), ""])
     overview_data.append([Spacer(1, 12), ""])
     
     # Get cluster sizes from papers
@@ -115,19 +143,29 @@ def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, win
         # Format keywords (without scores)
         keywords_str = ", ".join([k for k, _ in keywords])
         
-        # Calculate trend based on frequency changes
+        # Calculate trend based on frequency changes (improved logic)
         cluster_idx = np.where(cluster_ids == cluster)[0][0]
         window_freqs = frequencies[:, cluster_idx]
-        if len(window_freqs) > 1:
-            growth_rate = (window_freqs[-1] - window_freqs[0]) / len(window_freqs)
-            if growth_rate > 0.1:
-                trend = "Emerging"
-            elif growth_rate < -0.1:
-                trend = "Fading"
-            else:
-                trend = "Stable"
+        recent_n = 5
+        past_n = 15
+        recent = window_freqs[-recent_n:]
+        if len(window_freqs) > past_n:
+            past = window_freqs[-past_n:-recent_n]
+        elif len(window_freqs) > recent_n:
+            past = window_freqs[:-recent_n]
         else:
-            trend = "N/A"
+            past = window_freqs
+        recent_mean = np.mean(recent)
+        past_mean = np.mean(past) if len(past) > 0 else 0
+        peak = np.max(window_freqs)
+        if recent_mean < 0.04 * peak:
+            trend = "Dormant"
+        elif recent_mean > 1.5 * past_mean and recent_mean > 0.04:
+            trend = "Trending"
+        elif recent_mean < 0.5 * past_mean and past_mean > 0.04:
+            trend = "Declining"
+        else:
+            trend = "Stable"
         
         # Add row to table
         table_data.append([
@@ -144,36 +182,39 @@ def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, win
     # Adjusted widths to prevent header overlap
     t = Table(table_data, colWidths=[1.2*inch, 1.5*inch, 3.5*inch, 1.2*inch])
     t.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#4a4e69")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 12),  # Reduced font size for headers
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-        ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ('WORDWRAP', (0, 0), (-1, -1), True),  # Enable word wrap for all cells
-        ('FONTSIZE', (0, 1), (-1, -1), 10),  # Smaller font for data rows
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),  # Center content vertically
-        ('LEFTPADDING', (0, 0), (-1, -1), 6),  # Add some padding
-        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+        ('FONTSIZE', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#f2e9e4")),
+        ('TEXTCOLOR', (0, 1), (-1, -1), colors.HexColor("#22223b")),
+        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE', (0, 1), (-1, -1), 10),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#c9ada7")),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
         ('TOPPADDING', (0, 0), (-1, -1), 6),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
     ]))
-    story.append(t)
-    story.append(Spacer(1, 20))
+    # Cluster Overview explainer
+    cluster_overview_explainer = Paragraph(
+        "<b>What is this?</b> This table summarizes each cluster, showing its size, top keywords, and trend over time. "
+        "<b>Why look at it?</b> It gives a quick overview of the main topics in your library and how they are changing.",
+        modern_normal)
+    story.append(KeepTogether([
+        Paragraph("Cluster Overview", modern_section_style),
+        cluster_overview_explainer,
+        Spacer(1, 6),
+        t,
+        Spacer(1, 8),
+        HRFlowable(width="100%", thickness=1, color=colors.HexColor("#c9ada7"), spaceBefore=8, spaceAfter=8)
+    ]))
     
-    # Topic Identification Analysis
-    story.append(Paragraph("Topic Identification Analysis", styles['Heading2']))
-    story.append(Spacer(1, 12))
-    
-    # Create a 2x1 subplot layout for cluster quality analysis
+    # Topic Identification Analysis plot (silhouette and elbow)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-    
     # Left subplot: Silhouette scores
     cluster_numbers = list(silhouette_scores.keys())
     scores = list(silhouette_scores.values())
-    
     ax1.plot(cluster_numbers, scores, 'bo-', linewidth=2, markersize=8)
     ax1.axvline(x=best_n_silhouette, color='red', linestyle='--', linewidth=2, label=f'Best Silhouette: {best_n_silhouette} clusters')
     if num_clusters is not None and num_clusters != best_n_silhouette:
@@ -183,11 +224,9 @@ def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, win
     ax1.set_title(f'Cluster Quality: Silhouette Scores\nBest: {best_n_silhouette} clusters (score: {silhouette_scores[best_n_silhouette]:.3f})')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
-    
     # Right subplot: Elbow plot (inertia/within-cluster sum of squares)
     inertia_clusters = list(inertias.keys())
     inertia_values = list(inertias.values())
-    
     ax2.plot(inertia_clusters, inertia_values, 'ro-', linewidth=2, markersize=8)
     ax2.axvline(x=best_n_elbow, color='red', linestyle='--', linewidth=2, label=f'Elbow Point: {best_n_elbow} clusters')
     if num_clusters is not None and num_clusters != best_n_elbow:
@@ -197,38 +236,27 @@ def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, win
     ax2.set_title(f'Cluster Quality: Elbow Method\nOptimal: {best_n_elbow} clusters')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
-    
     plt.tight_layout()
-    
-    # Save to BytesIO buffer
     silhouette_buffer = BytesIO()
     plt.savefig(silhouette_buffer, format='png', dpi=300, bbox_inches='tight')
     silhouette_buffer.seek(0)
     plt.close()
-    
-    # Add silhouette plot to PDF
-    story.append(Image(silhouette_buffer, width=650, height=325))
-    story.append(Spacer(1, 20))
-    
-    # Topic Evolution Analysis
-    story.append(Paragraph("Topic Evolution Analysis", styles['Heading2']))
-    story.append(Spacer(1, 12))
-    
-    # Create cluster frequencies visualization with larger size for landscape
-    plt.figure(figsize=(12, 6))
-    analyzer.visualize_cluster_frequencies(papers_library.papers, verbose=verbose)
-    plt.tight_layout()
-    
-    # Save to BytesIO buffer
-    img_buffer = BytesIO()
-    plt.savefig(img_buffer, format='png', dpi=300, bbox_inches='tight')
-    img_buffer.seek(0)
-    plt.close()
-    
-    # Add to PDF with adjusted size for landscape
-    story.append(Image(img_buffer, width=650, height=325))
+    # Topic Identification Analysis explainer
+    silhouette_explainer = Paragraph(
+        "<b>What is this?</b> These plots show how well your data clusters for different numbers of clusters. "
+        "The left plot shows the silhouette score (higher is better), and the right shows the elbow method (lower is better). "
+        "<b>Why look at it?</b> It helps you choose the best number of clusters for your data.",
+        modern_normal)
+    story.append(KeepTogether([
+        Paragraph("Topic Identification Analysis", modern_section_style),
+        silhouette_explainer,
+        Spacer(1, 6),
+        Image(silhouette_buffer, width=500, height=180),
+        Spacer(1, 8),
+        HRFlowable(width="100%", thickness=1, color=colors.HexColor("#c9ada7"), spaceBefore=8, spaceAfter=8)
+    ]))
 
-    # --- Per-cluster WCSS calculation and graphing (final clustering only) ---
+    # Insert WCSS block here (if model_tfidf is not None)
     if model_tfidf is not None:
         cluster_ids = np.unique([p.cluster_id for p in papers_library.papers if p.cluster_id is not None])
         tfidf_vectors = [model_tfidf[bow] for bow in bow_corpus]
@@ -237,36 +265,114 @@ def generate_cluster_report(papers_library, bow_corpus, dictionary, run_dir, win
         for i, vec in enumerate(tfidf_vectors):
             for idx, val in vec:
                 tfidf_dense[i, idx] = val
-        wcss_per_cluster = []
+        mean_wcss_per_cluster = []
         cluster_labels = np.array([p.cluster_id for p in papers_library.papers])
         for cluster in cluster_ids:
             indices = np.where(cluster_labels == cluster)[0]
             if len(indices) == 0:
-                wcss_per_cluster.append(0)
+                mean_wcss_per_cluster.append(0)
                 continue
             cluster_vecs = tfidf_dense[indices]
             centroid = cluster_vecs.mean(axis=0)
             sq_dists = np.sum((cluster_vecs - centroid) ** 2, axis=1)
-            wcss = np.sum(sq_dists)
-            wcss_per_cluster.append(wcss)
+            mean_wcss = np.mean(sq_dists)
+            mean_wcss_per_cluster.append(mean_wcss)
+        # Transform for plotting
+        plot_vals = 1 - np.array(mean_wcss_per_cluster)
         plt.figure(figsize=(10, 4))
-        plt.bar([f'Cluster {c}' for c in cluster_ids], wcss_per_cluster, color='teal')
-        plt.ylabel('Within-Cluster Sum of Squares (WCSS)')
+        plt.bar([f'Cluster {c}' for c in cluster_ids], plot_vals, color='teal')
+        plt.ylabel('1 - Mean Squared Distance to Centroid (log scale)')
         plt.xlabel('Cluster')
-        plt.title('WCSS for Each Cluster')
+        plt.title('Transformed Mean WCSS for Each Cluster')
+        plt.yscale('log')
         plt.xticks(rotation=45, ha='right')
         plt.tight_layout()
         wcss_buffer = BytesIO()
         plt.savefig(wcss_buffer, format='png', dpi=300, bbox_inches='tight')
         wcss_buffer.seek(0)
         plt.close()
-        story.append(Paragraph("Per-Cluster Tightness (WCSS)", styles['Heading2']))
-        story.append(Spacer(1, 12))
-        story.append(Image(wcss_buffer, width=650, height=250))
-    # --- End WCSS ---
-    
+        wcss_explainer = Paragraph(
+            "<b>What is this?</b> This bar chart shows 1 minus the mean within-cluster sum of squares (mean WCSS) for each cluster, on a log scale. "
+            "<b>Why look at it?</b> Higher values indicate tighter, more specific clusters; lower values indicate more spread out or miscellaneous clusters. The log scale helps visualize differences when values are close to 1.",
+            modern_normal)
+        story.append(KeepTogether([
+            Paragraph("Per-Cluster Tightness (1 - Mean WCSS, log scale)", modern_section_style),
+            wcss_explainer,
+            Spacer(1, 6),
+            Image(wcss_buffer, width=500, height=180),
+            Spacer(1, 8),
+            HRFlowable(width="100%", thickness=1, color=colors.HexColor("#c9ada7"), spaceBefore=8, spaceAfter=8)
+        ]))
+
+    # Topic Evolution Analysis plot
+    plt.figure(figsize=(12, 6))
+    analyzer.visualize_cluster_frequencies(papers_library.papers, verbose=verbose)
+    plt.tight_layout()
+    img_buffer = BytesIO()
+    plt.savefig(img_buffer, format='png', dpi=300, bbox_inches='tight')
+    img_buffer.seek(0)
+    plt.close()
+    # Topic Evolution Analysis explainer
+    te_explainer = Paragraph(
+        "<b>What is this?</b> This heatmap shows how the distribution of clusters changes over time. "
+        "Each row is a cluster, and each column is a time window. "
+        "<b>Why look at it?</b> It helps you see which topics are emerging, stable, or fading in your library.",
+        modern_normal)
+    story.append(KeepTogether([
+        Paragraph("Topic Evolution Analysis", modern_section_style),
+        te_explainer,
+        Spacer(1, 6),
+        Image(img_buffer, width=500, height=180),
+        Spacer(1, 8),
+        HRFlowable(width="100%", thickness=1, color=colors.HexColor("#c9ada7"), spaceBefore=8, spaceAfter=8)
+    ]))
+
     # Build PDF
     doc.build(story)
+    
+    if report_mode == 'html':
+        def img_to_base64(buffer):
+            buffer.seek(0)
+            return base64.b64encode(buffer.read()).decode('utf-8')
+
+        html = [
+            '<html><head><meta charset="utf-8"><title>Library Analysis Report</title>',
+            '<style>body{font-family:Helvetica,Arial,sans-serif;background:#f8f9fa;color:#22223b;margin:0;padding:0;} .container{max-width:900px;margin:30px auto;background:#fff;border-radius:10px;box-shadow:0 2px 8px #ccc;padding:32px;} h1{color:#22223b;} h2{color:#4a4e69;background:#f2e9e4;padding:8px 12px;border-radius:6px;} .explainer{margin:8px 0 18px 0;color:#555;font-size:1.05em;} table{border-collapse:collapse;width:100%;margin-bottom:24px;} th,td{border:1px solid #c9ada7;padding:8px;text-align:center;} th{background:#4a4e69;color:#fff;} tr:nth-child(even){background:#f2e9e4;} .section{margin-bottom:40px;} img{display:block;margin:0 auto 12px auto;max-width:100%;border-radius:8px;box-shadow:0 1px 4px #bbb;} hr{border:none;border-top:1px solid #c9ada7;margin:32px 0;}</style></head><body><div class="container">'
+        ]
+        html.append('<h1>Library Analysis Report</h1><hr>')
+        # Cluster Overview
+        html.append('<div class="section"><h2>Cluster Overview</h2>')
+        html.append('<div class="explainer"><b>What is this?</b> This table summarizes each cluster, showing its size, top keywords, and trend over time. <b>Why look at it?</b> It gives a quick overview of the main topics in your library and how they are changing.</div>')
+        html.append('<table><tr>' + ''.join(f'<th>{col}</th>' for col in table_data[0]) + '</tr>')
+        for row in table_data[1:]:
+            html.append('<tr>' + ''.join(f'<td>{cell}</td>' for cell in row) + '</tr>')
+        html.append('</table></div><hr>')
+        # Topic Identification Analysis
+        html.append('<div class="section"><h2>Topic Identification Analysis</h2>')
+        html.append('<div class="explainer"><b>What is this?</b> These plots show how well your data clusters for different numbers of clusters. The left plot shows the silhouette score (higher is better), and the right shows the elbow method (lower is better). <b>Why look at it?</b> It helps you choose the best number of clusters for your data.</div>')
+        html.append(f'<img src="data:image/png;base64,{img_to_base64(silhouette_buffer)}" alt="Silhouette and Elbow Plot">')
+        html.append('</div><hr>')
+        # Per-Cluster Tightness (Mean WCSS)
+        if model_tfidf is not None:
+            html.append('<div class="section"><h2>Per-Cluster Tightness (1 - Mean WCSS, log scale)</h2>')
+            html.append('<div class="explainer"><b>What is this?</b> This bar chart shows 1 minus the mean within-cluster sum of squares (mean WCSS) for each cluster, on a log scale. <b>Why look at it?</b> Higher values indicate tighter, more specific clusters; lower values indicate more spread out or miscellaneous clusters. The log scale helps visualize differences when values are close to 1.</div>')
+            html.append(f'<img src="data:image/png;base64,{img_to_base64(wcss_buffer)}" alt="1 - Mean WCSS Bar Chart (log scale)">')
+            html.append('</div><hr>')
+        # Topic Evolution Analysis
+        html.append('<div class="section"><h2>Topic Evolution Analysis</h2>')
+        html.append('<div class="explainer"><b>What is this?</b> This heatmap shows how the distribution of clusters changes over time. Each row is a cluster, and each column is a time window. <b>Why look at it?</b> It helps you see which topics are emerging, stable, or fading in your library.</div>')
+        html.append(f'<img src="data:image/png;base64,{img_to_base64(img_buffer)}" alt="Cluster Distribution Over Time Heatmap">')
+        html.append('</div></div></body></html>')
+        html_path = os.path.join(run_dir, f"library_analysis_report_{timestamp}.html")
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(html))
+        print(f"HTML report saved to {html_path}")
+        # Save cluster preferences to text file as before
+        preferences_file = os.path.join(run_dir, 'feed_search_preferences.txt')
+        with open(preferences_file, 'w') as f:
+            f.write('\n'.join(cluster_lines))
+        print(f"Feed preferences saved to {preferences_file}")
+        return
     
     # Save cluster preferences to text file
     preferences_file = os.path.join(run_dir, 'feed_search_preferences.txt')
@@ -291,6 +397,8 @@ def main():
                        help="Number of clusters to use. If 'auto', will optimize using --optimization-algorithm. Otherwise, provide an integer.")
     parser.add_argument('--optimization-algorithm', choices=['silhouette', 'elbow'], default='silhouette',
                        help="Algorithm to use for cluster number optimization if --num-clusters is 'auto'.")
+    parser.add_argument('--report-mode', type=str, choices=['pdf', 'html'], default='pdf',
+                       help="Report output format: 'pdf' (default) or 'html'.")
     args = parser.parse_args()
 
     # Set default paths for library file and model path
@@ -381,7 +489,7 @@ def main():
                           window_size=args.window_size, step_size=args.step_size, verbose=args.verbose,
                           silhouette_scores=silhouette_scores, inertias=inertias, 
                           best_n_silhouette=best_n_silhouette, best_n_elbow=best_n_elbow,
-                          num_clusters=num_clusters, model_tfidf=model_tfidf)
+                          num_clusters=num_clusters, model_tfidf=model_tfidf, report_mode=args.report_mode)
 
     # Save papers library to output directory
     print("Saving papers library...")
