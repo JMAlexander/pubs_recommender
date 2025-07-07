@@ -8,138 +8,25 @@ from nltk.corpus import stopwords
 import pickle
 import numpy as np
 import pandas as pd
-import source as lang_helper
 import os
 import argparse
 from dotenv import load_dotenv
 import json
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# Import from analysis modules
+from pubs_recommender import models as pr_models
+from pubs_recommender import feeds as pr_feeds
+from pubs_recommender import utils as pr_utils
+from pubs_recommender import email as pr_email
+from pubs_recommender import get_cosine_matrix, get_topic_similarity, match_topics_to_publications
 
 # Load environment variables
 env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
 print(f"\nLoading environment variables from {env_path}")
 load_dotenv(env_path)
-
-def load_models(model_dir):
-    """Load the necessary models for analysis."""
-    dictionary = corpora.Dictionary.load(os.path.join(model_dir, 'dictionary.gensim'))
-
-    # Load the Pubmed model using the helper function
-    print("Loading the Pubmed model and building the similarity index...")
-    pubmed_wordmodel = lang_helper.load_word_model(model_dir)
-    termsim_index = WordEmbeddingSimilarityIndex(pubmed_wordmodel)
-
-    return dictionary, termsim_index, pubmed_wordmodel
-
-def create_models(dictionary, combined_corpus, termsim_index):
-    """
-    Create TF-IDF model and term similarity matrix using both library and feed corpora.
-    
-    Args:
-        dictionary: Gensim dictionary
-        library_corpus: BOW corpus of the library papers
-        feed_corpus: BOW corpus of the new feed publications
-    
-    Returns:
-        model_tfidf: TF-IDF model
-        termsim_matrix: Term similarity matrix
-    """
-    
-    # Create TF-IDF model
-    model_tfidf = models.TfidfModel(combined_corpus)
-    
-    # Create term similarity matrix
-    termsim_matrix = SparseTermSimilarityMatrix(
-        source=termsim_index,
-        dictionary=dictionary,
-        tfidf=model_tfidf
-    )
-    
-    return model_tfidf, termsim_matrix
-
-def process_feeds(feeds, include_read, pubmed_wordmodel):
-    """
-    Process the RSS feeds and tokenize the publications.
-    """
-    lang_helper.check_feeds(feeds)
-    pubs, tokenized_pubs = lang_helper.tokenize_feeds(feeds, type='title', include_read=include_read, wordmodel=pubmed_wordmodel)
-    print(f"\nInitial number of papers from feeds: {len(pubs)}")
-    return pubs, tokenized_pubs
-
-def generate_and_send_email(email, pubs, papers, bow_corpus, similarity_matrix, dictionary, include_read_items=False):
-    """
-    Generate and send an email with publication recommendations.
-    
-    Args:
-        pubs: List of publications to recommend
-        papers: List of Paper objects with cluster IDs
-        bow_corpus: Bag of words corpus for new publications
-        similarity_matrix: Similarity matrix between papers and publications
-        dictionary: Gensim dictionary
-        include_read_items: Whether to include already read items
-    """
-    # Generate email message
-    
-    # Send email
-
-
-def load_analyzed_library(archive_dir):
-    """
-    Load the analyzed library from papers_library_with_clusters.json in the data directory.
-    
-    Args:
-        archive_dir: Directory containing the paper archive
-        
-    Returns:
-        Library object with cluster information
-        
-    Raises:
-        FileNotFoundError: If papers_library_with_clusters.json is not found in data directory
-    """
-    # Look for the JSON file in the data directory
-    library_path = os.path.join(archive_dir, 'papers_library_with_clusters.json')
-    if not os.path.exists(library_path):
-        raise FileNotFoundError(f"Analyzed library not found at {library_path}. Please run analyze_cluster.py first.")
-    
-    # Create new library object
-    library = lang_helper.Library()
-    
-    # Load JSON data
-    with open(library_path, 'r') as f:
-        papers_data = json.load(f)
-    
-    # Create Paper objects from JSON data
-    for paper_dict in papers_data:
-        paper = lang_helper.Paper()
-        paper.title = paper_dict['title']
-        paper.abstract = paper_dict['abstract']
-        paper.authors = paper_dict['authors']
-        paper.date_created = paper_dict['date_created']
-        paper.date_updated = paper_dict['date_updated']
-        paper.read = paper_dict['read']
-        paper.notes = paper_dict['notes']
-        paper.ratings = paper_dict['ratings']
-        paper.doi = paper_dict['doi']
-        paper.pmid = paper_dict['pmid']
-        paper.pmcid = paper_dict['pmcid']
-        paper.year = paper_dict['year']
-        paper.journal = paper_dict['journal']
-        paper.date = paper_dict['date']
-        paper.pages = paper_dict['pages']
-        paper.issue = paper_dict['issue']
-        paper.volume = paper_dict['volume']
-        paper.cluster_id = paper_dict['cluster_id']
-        paper.silhouette_score = paper_dict['silhouette_score']
-        library.papers.append(paper)
-    
-    return library
-
-def load_cluster_preferences(config_dir):
-    """Load cluster preferences from CSV file and return list of included cluster IDs."""
-    preferences_file = os.path.join(config_dir, 'cluster_search_preferences.csv')
-    if not os.path.exists(preferences_file):
-        return []  # Return empty list if file doesn't exist
-    preferences_df = pd.read_csv(preferences_file)
-    return preferences_df[preferences_df['include_in_search'] == 'YES']['cluster_id'].tolist()
 
 def main():
     parser = argparse.ArgumentParser(description='Analyze new publications and send recommendations.')
@@ -158,7 +45,7 @@ def main():
     config_dir = os.path.join(base_dir, 'config')
 
     # Load dictionary and models
-    dictionary, termsim_index, pubmed_wordmodel = load_models(models_dir)
+    dictionary, termsim_index, pubmed_wordmodel = pr_models.load_existing_models_for_feeds(models_dir)
     
     # Read feeds from file
     feeds_file = os.path.join(config_dir, 'feeds.txt')
@@ -168,10 +55,10 @@ def main():
     print(f"\nNumber of feeds: {len(feeds)}")
     
     # Get new publications
-    pubs, tokenized_pubs = process_feeds(feeds, args.include_read, pubmed_wordmodel)
+    pubs, tokenized_pubs = pr_feeds.process_feeds(feeds, args.include_read, pubmed_wordmodel)
     
     # Save new publications to pubs_reviewed.csv
-    lang_helper.save_sent_papers(pubs)
+    pr_feeds.save_sent_papers(pubs)
 
     # Add new documents to dictionary
     dictionary.add_documents(tokenized_pubs)
@@ -181,8 +68,8 @@ def main():
     dictionary.filter_tokens(bad_ids=[tokenid for tokenid, term in dictionary.items() if term not in pubmed_wordmodel])
     
     # Load library with cluster information
-    papers_library = load_analyzed_library(archive_dir)
-    tokenized_library = lang_helper.tokenize_library(papers_library, type='title', wordmodel=pubmed_wordmodel)
+    papers_library = pr_models.load_analyzed_library(archive_dir)
+    tokenized_library = pr_utils.tokenize_library(papers_library, field='title', wordmodel=pubmed_wordmodel)
     print(f"\nNumber of papers in library: {len(papers_library.papers)}")
     
     # Create bow corpora
@@ -191,42 +78,42 @@ def main():
     combined_corpus = corpus_pubs + corpus_library
 
     # Create models
-    model_tfidf, termsim_matrix = create_models(dictionary, combined_corpus, termsim_index)
+    model_tfidf, termsim_matrix = pr_models.create_tfidf_and_similarity_matrix(dictionary, combined_corpus, termsim_index)
     
     # Compare publications and get similarity matrix
-    library_pubs_similarity_matrix = lang_helper.get_cosine_matrix(termsim_matrix, corpus_library, corpus_pubs)
+    library_pubs_similarity_matrix = get_cosine_matrix(termsim_matrix, corpus_library, corpus_pubs)
     
     # Get cluster IDs from papers
     topic_labels = [paper.cluster_id for paper in papers_library.papers]
     
     # Get topic similarity matrix
-    topic_pubs_similarity_matrix = lang_helper.get_topic_similarity(library_pubs_similarity_matrix, topic_labels)
+    topic_pubs_similarity_matrix = get_topic_similarity(library_pubs_similarity_matrix, topic_labels)
     print(f"\nTopic Pubs Matrix Size: {topic_pubs_similarity_matrix.shape}")
 
     # Load cluster preferences
-    included_clusters = load_cluster_preferences(config_dir)
+    included_clusters = pr_utils.load_cluster_preferences(config_dir)
     if included_clusters:
         print(f"\nIncluding only clusters: {included_clusters}")
     else:
         print("\nNo cluster preferences found, including all clusters")
     
     # Match topics to publications
-    topic_results = lang_helper.match_topics_to_publications(pubs, papers_library.papers, topic_pubs_similarity_matrix, included_clusters=included_clusters)
+    topic_results = match_topics_to_publications(pubs, papers_library.papers, topic_pubs_similarity_matrix, included_clusters=included_clusters)
     
     # Generate email
     if args.html_email:
-        email_message = lang_helper.draft_html_email(pubs, papers_library.papers, corpus_library, topic_pubs_similarity_matrix, dictionary, topic_results)
+        email_message = pr_email.draft_html_email(pubs, papers_library.papers, corpus_library, topic_pubs_similarity_matrix, dictionary, topic_results)
     else:
-        email_message = lang_helper.draft_plaintext_email(pubs, papers_library.papers, corpus_library, topic_pubs_similarity_matrix, dictionary, topic_results)
+        email_message = pr_email.draft_plaintext_email(pubs, papers_library.papers, corpus_library, topic_pubs_similarity_matrix, dictionary, topic_results)
 
     # Send email
     if not args.target_email:
         raise ValueError("TARGET_EMAIL environment variable not set")
     else:
         if args.html_email:
-            lang_helper.send_email_with_Web_API(email_message, args.target_email, html_content=email_message)
+            pr_email.send_email_with_Web_API(email_message, args.target_email, html_content=email_message)
         else:
-            lang_helper.send_email_with_Web_API(email_message, args.target_email)
+            pr_email.send_email_with_Web_API(email_message, args.target_email)
 
 if __name__ == "__main__":
     main() 
